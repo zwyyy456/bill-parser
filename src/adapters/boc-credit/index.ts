@@ -23,6 +23,10 @@ const extractSpecialInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
   const pageNum = doc.numPages;
   let foreignCurrency: TextItem | undefined;
   let pageIdxOfForeignCurrency: number | undefined;
+  let rmbDetail: TextItem | undefined;
+  let pageIdxOfrmbDetail: number = 0;
+  const foreignRegex = /(美元账户|外币)交易明细/;
+  const rmbDetailRegex = /(人民币账户交易明细|人民币交易明细)/;
 
   for (let i = pageNum; i >= 1; --i) {
     const page = await doc.getPage(i);
@@ -30,25 +34,23 @@ const extractSpecialInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
     const allItems = textContent.items.filter(
       (item: TextItem | TextMarkedContent): item is TextItem => Boolean(`${(item as TextItem)?.str ?? ''}`.trim())
     );
-
-    if (allItems.find((item) => item.str.includes("美元账户交易明细"))) {
-      foreignCurrency = allItems.find((item) => item.str.includes("美元账户交易明细"));
+    const tmpForeignCurrency = allItems.find(item => foreignRegex.test(item.str));
+    if (tmpForeignCurrency) {
+      foreignCurrency = tmpForeignCurrency;
       pageIdxOfForeignCurrency = i;
-      break; // 找到外币交易明细，结束
     }
-    if (allItems.find((item) => item.str.includes("外币交易明细"))) {
-      foreignCurrency = allItems.find((item) => item.str.includes("外币易明细"));
-      pageIdxOfForeignCurrency = i;
-      break; // 找到外币交易明细，结束
+    rmbDetail = allItems.find(item => rmbDetailRegex.test(item.str));
+    if (rmbDetail) {
+      pageIdxOfrmbDetail = i;
+      break;
     }
 
-    console.log('foreignCurrency', foreignCurrency, 'pageIdxOfForeignCurrency', pageIdxOfForeignCurrency);
   }
-  return { foreignCurrency, pageIdxOfForeignCurrency };
+  console.log('foreignCurrency', foreignCurrency, 'pageIdxOfForeignCurrency', pageIdxOfForeignCurrency, 'rmbDetail', rmbDetail, 'pageIdxOfrmbDetail', pageIdxOfrmbDetail)
+  return { foreignCurrency, pageIdxOfForeignCurrency, rmbDetail, pageIdxOfrmbDetail };
 }
 
 const extractHeaderInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
-  // 先只考虑人民币，后面再考虑外币
   const page = await doc.getPage(2); //
   const textContent = await page.getTextContent();
   const allItems = textContent.items.filter(
@@ -66,7 +68,12 @@ const extractHeaderInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
   const allItems1 = textContent1.items.filter(
     (item: TextItem | TextMarkedContent): item is TextItem => Boolean(`${(item as TextItem)?.str ?? ''}`.trim())
   )
-  const titleItem = allItems1.find((item) => /中国银行信用卡帐单/.test(item.str));
+  const titleItem = allItems1.find((item) => /中国银行信用卡账单/.test(item.str));
+  // 从标题中提取年份信息
+  let billYear: string | undefined;
+  if (titleItem) {
+    billYear = titleItem.str.match(/(\d{4})年/)?.[1];
+  }
   if (headerItems.length === 0) {
     headerItems = AllHeaders
       .map((header) => allItems1.find((item) => item.str === header))
@@ -77,8 +84,6 @@ const extractHeaderInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
   // 后续代码中可以根据 getItemXIndex(item) 来判断 item 在哪一列
   // 取到列占据的大致横坐标范围，用于后续判断 item 在哪一列
   const headerXRanges = headerItems.map((item, index) => {
-    // const a = item.str === "金额" || item.str === "余额"
-    // const xRight = a ? item.transform[4] + item.width + 12 : item.transform[4] + item.width + 1;
     return {
       title: item.str,
       colIdx: index,
@@ -87,12 +92,13 @@ const extractHeaderInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
     }
   });
 
-  console.log('headerXRanges', headerXRanges);
+  console.log('headerXRanges', headerXRanges, 'billYear', billYear, 'titleItem', titleItem);
 
   return {
     titleItem,
     headerItems,
-    headerXRanges
+    headerXRanges,
+    billYear
   };
 }
 
@@ -111,7 +117,7 @@ type SpeicalInfo = PromiseValue<ReturnType<typeof extractSpecialInfoFromDoc>>
 type HeaderInfo = PromiseValue<ReturnType<typeof extractHeaderInfoFromDoc>>
 
 const extractInfoFromPage = async (page: pdfjs.PDFPageProxy, { headerXRanges }: HeaderInfo, pageNum: number, specialInfo: SpeicalInfo) => {
-  const { foreignCurrency, pageIdxOfForeignCurrency } = specialInfo;
+  const { foreignCurrency, pageIdxOfForeignCurrency, rmbDetail, pageIdxOfrmbDetail } = specialInfo;
   const textContent = await page.getTextContent();
   const allItems = textContent.items.filter(
     (item: TextItem | TextMarkedContent): item is TextItem => Boolean(`${(item as TextItem)?.str ?? ''}`.trim())
@@ -162,7 +168,8 @@ const extractInfoFromPage = async (page: pdfjs.PDFPageProxy, { headerXRanges }: 
   allItems.forEach(item => {
     const xIndex = getItemXIndex(item);
     const yIndex = getItemYIndex(item);
-    if (typeof xIndex !== 'undefined' && typeof yIndex !== 'undefined') {
+    // 明细是出现在 "人民币账户交易明细" 或者 "人民币交易明细" 之后
+    if (typeof xIndex !== 'undefined' && typeof yIndex !== 'undefined' && (pageNum > pageIdxOfrmbDetail || (pageNum == pageIdxOfrmbDetail && item.transform[5] <= rmbDetail?.transform[5]))) {
       if (pageIdxOfForeignCurrency && (pageNum > pageIdxOfForeignCurrency || (pageNum === pageIdxOfForeignCurrency && item.transform[5] <= foreignCurrency?.transform[5]))) {
         // 说明这里是外币交易明细
         FillTable(foreignTable, yIndex, xIndex, item);
@@ -200,7 +207,7 @@ const convertFromPdf = (file: File): Promise<string> => {
         const headerInfo = await extractHeaderInfoFromDoc(pdf);
         const specialInfo = await extractSpecialInfoFromDoc(pdf);
 
-        for (let i = 2; i <= pdf.numPages; i++) { // 中行信用卡第一页没有账单明细
+        for (let i = 1; i <= pdf.numPages; i++) {
           const page = await pdf.getPage(i);
           const info = await extractInfoFromPage(page, headerInfo, i, specialInfo);
           allIgnoreItems.push(...info.ignoreItems);
@@ -209,8 +216,30 @@ const convertFromPdf = (file: File): Promise<string> => {
         }
         const csvTitle = headerInfo.titleItem?.str || "中国银行信用卡帐单";
         const csvHeader = headerInfo.headerItems.map((item) => item.str).join(',') + ',' + '币种';
+
+        // 处理日期格式，特别是 MM/DD 格式
+        const processDateInCsv = (row: (string | null)[]) => {
+          if (!row || row.length === 0 || !headerInfo.billYear) return row;
+
+          // 第一列是交易日期
+          const dateStr = row[0];
+          if (dateStr && /^(0[1-9]|1[0-2])\/(0[1-9]|[12][0-9]|3[01])$/.test(dateStr)) {
+            const [month, day] = dateStr.split('/');
+            // 如果是 12 月，年份应该是账单年份的上一年
+            const year = parseInt(month) === 12 ? (parseInt(headerInfo.billYear) - 1).toString() : headerInfo.billYear;
+            row[0] = `${year}-${month}-${day}`;
+          }
+          return row;
+        };
+
         const csvBody = allTable
           .filter(row => row && row.length > 0) // 过滤掉空行
+          .filter(row => {
+            // 过滤掉包含"已为您减免本年度年费"的行
+            const transactionDesc = row[3]; // 交易描述在第 4 列（索引为 3）
+            return !(transactionDesc && typeof transactionDesc === 'string' && transactionDesc.includes('已为您减免本年度年费'));
+          })
+          .map(processDateInCsv) // 处理日期格式
           .map((row) => row.map((item) => `${item || ''}`.trim())
             .map((row) => row.includes(',') ? `"${row.replace(/"/g, '""')}"` : row).join(','))
           .join('\n');
