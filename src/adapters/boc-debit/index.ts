@@ -26,8 +26,8 @@ const extractHeaderInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
     .filter((item): item is TextItem => Boolean(item));
   console.log('headerItems', headerItems)
 
-  // Todo 将当前卡号后四位添加到表头中，用于后续账单生成
-  const cardIdItem = allItems.find((item) => /借记卡号： 62/.test(item.str)); // 银联发行的借记卡，卡号均以 62 开头
+  // 将当前卡号后四位添加到表头中，用于后续账单生成
+  const cardIdItem = allItems.find((item) => /借记卡号：\s*\d{4,}/.test(item.str)); // 银联发行的借记卡，卡号均以 62 开头
   const titleItem = allItems.find((item) => /中国银行交易流水明细单/.test(item.str));
 
 
@@ -46,10 +46,11 @@ const extractHeaderInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
   });
 
   console.log('headerXRanges', headerXRanges);
+  console.log('cardIdItem', cardIdItem)
 
-  // if (!headerCardItem) { // 中行不需要标题行
-  //     throw Error('未找到对方卡号/账号标题列')
-  // }
+  if (!cardIdItem) {
+    throw Error('未找到对方卡号/账号标题列')
+  }
 
   return {
     titleItem,
@@ -59,7 +60,7 @@ const extractHeaderInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
   };
 }
 
-const extractInfoFromPage = async (page: pdfjs.PDFPageProxy, { headerXRanges }: PromiseValue<ReturnType<typeof extractHeaderInfoFromDoc>>) => {
+const extractInfoFromPage = async (page: pdfjs.PDFPageProxy, { cardIdItem, headerXRanges }: PromiseValue<ReturnType<typeof extractHeaderInfoFromDoc>>) => {
   const textContent = await page.getTextContent();
   const allItems = textContent.items.filter(
     (item: TextItem | TextMarkedContent): item is TextItem => Boolean(`${(item as TextItem)?.str ?? ''}`.trim())
@@ -116,6 +117,15 @@ const extractInfoFromPage = async (page: pdfjs.PDFPageProxy, { headerXRanges }: 
       ignoreItems.push(item);
     }
   });
+  const extractCardNumber = (str?: string) => {
+    if (!str) return '未知卡号';
+    const digits = str.replace(/\D/g, ''); // 移除所有非数字字符
+    return digits.slice(-4) || '未知卡号'; // 确保至少返回后 4 位
+  };
+
+  table.forEach((row) => {
+    row.push(extractCardNumber(cardIdItem?.str));
+  });
 
   return { ignoreItems, table };
 }
@@ -142,7 +152,7 @@ const convertFromPdf = (file: File): Promise<string> => {
           allTable.push(...info.table);
         }
         const csvTitle = headerInfo.titleItem?.str || "中国银行交易流水明细单";
-        const csvHeader = headerInfo.headerItems.map((item) => item.str).join(',');
+        const csvHeader = headerInfo.headerItems.map((item) => item.str).join(',') + ',' + '借记卡号';
         const csvBody = allTable
           .map((row) => row.map((item) => `${item || ''}`.trim())
             .map((row) => row.includes(',') ? `"${row.replace(/"/g, '""')}"` : row).join(','))
