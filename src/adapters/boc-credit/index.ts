@@ -8,9 +8,44 @@ import { Adapter, PromiseValue } from '../types';
  * 行高不固定，存在行内换行的情况；
  * 交易描述字段接近于水平方向居中，垂直方向向上对齐，但与边框留下了不少空隙
  * 其他字段水平与垂直方向居中对齐
+ * 按月发送的账单，表格中日期为 YYYY-MM-DD
+ * 如果是补制的账单，表格中日期显示为 MM/DD
+ * 外币暂时只支持美元
+ * 第一页没有账单明细，为账单总结
  */
 
 const AllHeaders = ["交易日", "银行记账日", "卡号后四位", "交易描述", "存入", "支出"]
+
+// 读取积分奖励计划、外币交易明细所在页面和坐标
+// 从而可以区分人民币与外币交易
+// 不包含积分奖励计划
+const extractSpecialInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
+  const pageNum = doc.numPages;
+  let foreignCurrency: TextItem | undefined;
+  let pageIdxOfForeignCurrency: number | undefined;
+
+  for (let i = pageNum; i >= 1; --i) {
+    const page = await doc.getPage(i);
+    const textContent = await page.getTextContent();
+    const allItems = textContent.items.filter(
+      (item: TextItem | TextMarkedContent): item is TextItem => Boolean(`${(item as TextItem)?.str ?? ''}`.trim())
+    );
+
+    if (allItems.find((item) => item.str.includes("美元账户交易明细"))) {
+      foreignCurrency = allItems.find((item) => item.str.includes("美元账户交易明细"));
+      pageIdxOfForeignCurrency = i;
+      break; // 找到外币交易明细，结束
+    }
+    if (allItems.find((item) => item.str.includes("外币交易明细"))) {
+      foreignCurrency = allItems.find((item) => item.str.includes("外币易明细"));
+      pageIdxOfForeignCurrency = i;
+      break; // 找到外币交易明细，结束
+    }
+
+    console.log('foreignCurrency', foreignCurrency, 'pageIdxOfForeignCurrency', pageIdxOfForeignCurrency);
+  }
+  return { foreignCurrency, pageIdxOfForeignCurrency };
+}
 
 const extractHeaderInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
   // 先只考虑人民币，后面再考虑外币
@@ -21,20 +56,22 @@ const extractHeaderInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
   )
 
   // 过滤出所有的表头
-  const headerItems = AllHeaders
+  let headerItems = AllHeaders
     .map((header) => allItems.find((item) => item.str === header))
     .filter((item): item is TextItem => Boolean(item));
   console.log('headerItems', headerItems)
 
-  // Todo 将当前卡号后四位添加到表头中，用于后续账单生成
-  // const cardIdItem = allItems.find((item) => /借记卡号： 62/.test(item.str)); // 信用卡账单表格中会显示卡号后四位，故不再需要
   const firstPage = await doc.getPage(1);
   const textContent1 = await firstPage.getTextContent();
   const allItems1 = textContent1.items.filter(
     (item: TextItem | TextMarkedContent): item is TextItem => Boolean(`${(item as TextItem)?.str ?? ''}`.trim())
   )
   const titleItem = allItems1.find((item) => /中国银行信用卡帐单/.test(item.str));
-
+  if (headerItems.length === 0) {
+    headerItems = AllHeaders
+      .map((header) => allItems1.find((item) => item.str === header))
+      .filter((item): item is TextItem => Boolean(item));
+  }
 
   // 根据表头列的横坐标范围，计算出每列的横坐标范围
   // 后续代码中可以根据 getItemXIndex(item) 来判断 item 在哪一列
@@ -59,7 +96,22 @@ const extractHeaderInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
   };
 }
 
-const extractInfoFromPage = async (page: pdfjs.PDFPageProxy, { headerXRanges }: PromiseValue<ReturnType<typeof extractHeaderInfoFromDoc>>) => {
+const FillTable = (table: string[][], yIndex: number, xIndex: number, item: TextItem) => {
+  if (!table[yIndex]) {
+    table[yIndex] = Array(6).fill(null);
+  }
+  if (table[yIndex][xIndex] === null) {
+    table[yIndex][xIndex] = item.str;
+  } else {
+    table[yIndex][xIndex] = table[yIndex][xIndex] + item.str;
+  }
+}
+
+type SpeicalInfo = PromiseValue<ReturnType<typeof extractSpecialInfoFromDoc>>
+type HeaderInfo = PromiseValue<ReturnType<typeof extractHeaderInfoFromDoc>>
+
+const extractInfoFromPage = async (page: pdfjs.PDFPageProxy, { headerXRanges }: HeaderInfo, pageNum: number, specialInfo: SpeicalInfo) => {
+  const { foreignCurrency, pageIdxOfForeignCurrency } = specialInfo;
   const textContent = await page.getTextContent();
   const allItems = textContent.items.filter(
     (item: TextItem | TextMarkedContent): item is TextItem => Boolean(`${(item as TextItem)?.str ?? ''}`.trim())
@@ -74,11 +126,18 @@ const extractInfoFromPage = async (page: pdfjs.PDFPageProxy, { headerXRanges }: 
   }
   const table: string[][] = [];
   const ignoreItems: TextItem[] = [];
+  const foreignTable: string[][] = [];
 
-  // 获取记账日期列 YYYY-MM-DD，后续会根据记账日期定位每行的纵坐标
+  // 获取记账日期列（支持 YYYY-MM-DD 和 MM/DD 两种格式），后续会根据记账日期定位每行的纵坐标
   const isPostedDateCol = (item: TextItem) => {
+    // 这里就只会取第一列的日期用于后续获取 Y 坐标范围，从而可以排除积分奖励计划
     return getItemXIndex(item) === 0 &&
-      /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$/.test(item?.str);
+      (
+        // 匹配 YYYY-MM-DD 格式（标准账单）
+        /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$/.test(item?.str) ||
+        // 匹配 MM/DD 格式（补制账单）
+        /^(0[1-9]|1[0-2])\/(0[1-9]|[12][0-9]|3[01])$/.test(item?.str)
+      );
   };
   const postedDateItems = allItems.filter(isPostedDateCol);
   console.log('postedDateItems', postedDateItems); // Y 轴坐标范围应该也正确
@@ -100,25 +159,29 @@ const extractInfoFromPage = async (page: pdfjs.PDFPageProxy, { headerXRanges }: 
   }
   console.log('allItems', allItems);
 
-  // Todo：处理表格内换行的情况
   allItems.forEach(item => {
     const xIndex = getItemXIndex(item);
     const yIndex = getItemYIndex(item);
     if (typeof xIndex !== 'undefined' && typeof yIndex !== 'undefined') {
-      if (!table[yIndex]) {
-        table[yIndex] = Array(6).fill(null); // 12 是列的数量
-      }
-      if (table[yIndex][xIndex] === null) {
-        table[yIndex][xIndex] = item.str;
+      if (pageIdxOfForeignCurrency && (pageNum > pageIdxOfForeignCurrency || (pageNum === pageIdxOfForeignCurrency && item.transform[5] <= foreignCurrency?.transform[5]))) {
+        // 说明这里是外币交易明细
+        FillTable(foreignTable, yIndex, xIndex, item);
       } else {
-        table[yIndex][xIndex] = table[yIndex][xIndex] + item.str;
+        FillTable(table, yIndex, xIndex, item);
       }
     } else {
       ignoreItems.push(item);
     }
   });
+  table.forEach((row) => {
+    row.push('CNY');
+  });
+  foreignTable.forEach((row) => {
+    row.push('USD');
+  });
 
-  return { ignoreItems, table };
+  console.log('foreignTable', foreignTable)
+  return { ignoreItems, table, foreignTable };
 }
 
 const convertFromPdf = (file: File): Promise<string> => {
@@ -135,16 +198,19 @@ const convertFromPdf = (file: File): Promise<string> => {
 
 
         const headerInfo = await extractHeaderInfoFromDoc(pdf);
+        const specialInfo = await extractSpecialInfoFromDoc(pdf);
 
-        for (let i = 1; i <= pdf.numPages; i++) {
+        for (let i = 2; i <= pdf.numPages; i++) { // 中行信用卡第一页没有账单明细
           const page = await pdf.getPage(i);
-          const info = await extractInfoFromPage(page, headerInfo);
+          const info = await extractInfoFromPage(page, headerInfo, i, specialInfo);
           allIgnoreItems.push(...info.ignoreItems);
           allTable.push(...info.table);
+          allTable.push(...info.foreignTable);
         }
         const csvTitle = headerInfo.titleItem?.str || "中国银行信用卡帐单";
-        const csvHeader = headerInfo.headerItems.map((item) => item.str).join(',');
+        const csvHeader = headerInfo.headerItems.map((item) => item.str).join(',') + ',' + '币种';
         const csvBody = allTable
+          .filter(row => row && row.length > 0) // 过滤掉空行
           .map((row) => row.map((item) => `${item || ''}`.trim())
             .map((row) => row.includes(',') ? `"${row.replace(/"/g, '""')}"` : row).join(','))
           .join('\n');
