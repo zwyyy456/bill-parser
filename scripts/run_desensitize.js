@@ -2,7 +2,7 @@
 import fs from 'fs'; // ✅ ES 模块语法
 import path from 'path';
 // 引入脱敏函数（假设 boc_debit_desensitize.js 在相同目录）
-import { desensitize, replaceAllOccurrences } from '../../../scripts/boc_debit_desensitize.js';
+import { desensitize, replaceAllOccurrences } from './boc_debit_desensitize.js';
 
 
 // 处理单个文件
@@ -11,7 +11,7 @@ function processFile(filePath) {
     // 读取 JSON 文件
     var data = fs.readFileSync(filePath, 'utf8');
     const records = JSON.parse(data);
-    // data = replaceAllOccurrences(data, '上海市xx大厦', '海上');
+    // data = replaceAllOccurrences(data, '上海市 xx 大厦', '海上');
 
     // 遍历并脱敏每个记录的 str 字段
     records.forEach((record, index) => {
