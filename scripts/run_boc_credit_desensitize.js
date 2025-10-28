@@ -1,5 +1,5 @@
 // 引入文件系统模块
-import fs from 'fs'; // ✅ ES 模块语法
+import fs from 'fs'; // 
 import path from 'path';
 // 引入脱敏函数（假设 boc_credit_desensitize.js 在相同目录）
 import { desensitize, replaceDealDetail } from '../../../scripts/boc_credit_desensitize.js';
