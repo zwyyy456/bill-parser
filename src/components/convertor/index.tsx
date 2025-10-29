@@ -1,4 +1,4 @@
-import { Button, Segmented, Upload } from "antd";
+import { App as AntdApp, Button, Segmented, Upload } from "antd";
 import React, { useState } from "react";
 import { SegmentedOptions } from "antd/es/segmented";
 import { RcFile } from "antd/es/upload";
@@ -21,25 +21,38 @@ const options: SegmentedOptions<string> = AdapterList.map((a) => {
 });
 
 const Convertor: React.FC = () => {
+  const { modal } = AntdApp.useApp();
   const [selectedKey, setSelectedKey] = useState<string>(AdapterList[0]?.key);
   const [sourceFile, setSourceFile] = useState<File>();
   const [csv, setCsv] = useState<string>();
   const selectedAdapter = AdapterMap[selectedKey];
 
-  const handleSelectorChange = (k: string) => {
-    setSelectedKey(k);
+  const resetState = () => {
     setSourceFile(undefined);
     setCsv(undefined);
+  };
+
+  const handleSelectorChange = (k: string) => {
+    setSelectedKey(k);
+    resetState();
   }
 
   const handleUpload = async (file: RcFile) => {
     try {
       setSourceFile(file);
+      setCsv(undefined);
       const csv = await selectedAdapter.converter(file);
       setCsv(csv);
     } catch (error) {
-      console.log('error', error);
+      const message = error instanceof Error ? error.message : String(error);
+      modal.error({
+        title: '文件解析失败',
+        content: message,
+        onOk: resetState,
+        afterClose: resetState,
+      });
     }
+    return false;
   };
 
   const handleDownload = () => {
