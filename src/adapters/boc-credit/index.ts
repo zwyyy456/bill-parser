@@ -16,6 +16,14 @@ import { Adapter, PromiseValue } from '../types';
 
 const AllHeaders = ["交易日", "银行记账日", "卡号后四位", "交易描述", "存入", "支出"]
 
+const extractAllItemFromPage = async (page: pdfjs.PDFPageProxy) => {
+  const textContent = await page.getTextContent();
+  const allItems = textContent.items.filter(
+    (item: TextItem | TextMarkedContent): item is TextItem => Boolean(`${(item as TextItem)?.str ?? ''}`.trim())
+  );
+  return allItems;
+}
+
 // 读取积分奖励计划、外币交易明细所在页面和坐标
 // 从而可以区分人民币与外币交易
 // 不包含积分奖励计划
@@ -30,10 +38,7 @@ const extractSpecialInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
 
   for (let i = pageNum; i >= 1; --i) {
     const page = await doc.getPage(i);
-    const textContent = await page.getTextContent();
-    const allItems = textContent.items.filter(
-      (item: TextItem | TextMarkedContent): item is TextItem => Boolean(`${(item as TextItem)?.str ?? ''}`.trim())
-    );
+    const allItems = await extractAllItemFromPage(page);
     const tmpForeignCurrency = allItems.find(item => foreignRegex.test(item.str));
     if (tmpForeignCurrency) {
       foreignCurrency = tmpForeignCurrency;
@@ -51,32 +56,28 @@ const extractSpecialInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
 }
 
 const extractHeaderInfoFromDoc = async (doc: pdfjs.PDFDocumentProxy) => {
-  const page = await doc.getPage(2); //
-  const textContent = await page.getTextContent();
-  const allItems = textContent.items.filter(
-    (item: TextItem | TextMarkedContent): item is TextItem => Boolean(`${(item as TextItem)?.str ?? ''}`.trim())
-  )
+  const secondPage = await doc.getPage(2);
+  const allSeconPageItems = await extractAllItemFromPage(secondPage);
 
-  // 过滤出所有的表头
+  // 提取第二页所有文本，过滤出所有的表头
   let headerItems = AllHeaders
-    .map((header) => allItems.find((item) => item.str === header))
+    .map((header) => allSeconPageItems.find((item) => item.str === header))
     .filter((item): item is TextItem => Boolean(item));
   console.log('headerItems', headerItems)
 
+  // 提取第一页的所有文本项，用于提取标题和年份
   const firstPage = await doc.getPage(1);
-  const textContent1 = await firstPage.getTextContent();
-  const allItems1 = textContent1.items.filter(
-    (item: TextItem | TextMarkedContent): item is TextItem => Boolean(`${(item as TextItem)?.str ?? ''}`.trim())
-  )
-  const titleItem = allItems1.find((item) => /中国银行信用卡账单/.test(item.str));
+  const allFirstPageItems = await extractAllItemFromPage(firstPage);
+  const titleItem = allFirstPageItems.find((item) => /中国银行信用卡账单/.test(item.str));
   // 从标题中提取年份信息
   let billYear: string | undefined;
   if (titleItem) {
     billYear = titleItem.str.match(/(\d{4})年/)?.[1];
   }
+  // 对于普通账单第一页是总览，表头位于第二页；对于补制账单，表头位于第一页
   if (headerItems.length === 0) {
     headerItems = AllHeaders
-      .map((header) => allItems1.find((item) => item.str === header))
+      .map((header) => allFirstPageItems.find((item) => item.str === header))
       .filter((item): item is TextItem => Boolean(item));
   }
 
@@ -118,10 +119,7 @@ type HeaderInfo = PromiseValue<ReturnType<typeof extractHeaderInfoFromDoc>>
 
 const extractInfoFromPage = async (page: pdfjs.PDFPageProxy, { headerXRanges }: HeaderInfo, pageNum: number, specialInfo: SpeicalInfo) => {
   const { foreignCurrency, pageIdxOfForeignCurrency, rmbDetail, pageIdxOfrmbDetail } = specialInfo;
-  const textContent = await page.getTextContent();
-  const allItems = textContent.items.filter(
-    (item: TextItem | TextMarkedContent): item is TextItem => Boolean(`${(item as TextItem)?.str ?? ''}`.trim())
-  );
+  const allItems = await extractAllItemFromPage(page);
 
   const getItemXIndex = (item: TextItem) => {
     // 判断内容行与哪个列横坐标范围有重叠，从而判断在哪一列
